@@ -1,30 +1,124 @@
-#!/usr/bin/python3
-# Fabfile to delete out-of-date archives.
-import os
-from fabric.api import *
+#!/usr/bin/puppet apply
+# Script that redoes task 0 (sets up your web servers for the deployment of web_static)
 
-env.hosts = ["104.196.168.90", "35.196.46.172"]
+exec { 'apt-get-update':
+  command => '/usr/bin/apt-get update',
+  path    => '/usr/bin:/usr/sbin:/bin',
+}
 
+exec { 'remove-current':
+  command => 'rm -rf /data/web_static/current',
+  path    => '/usr/bin:/usr/sbin:/bin',
+}
 
-def do_clean(number=0):
-    """Delete out-of-date archives.
+package { 'nginx':
+  ensure  => installed,
+  require => Exec['apt-get-update'],
+}
 
-    Args:
-        number (int): The number of archives to keep.
+file { '/var/www':
+  ensure  => directory,
+  mode    => '0755',
+  recurse => true,
+  require => Package['nginx'],
+}
 
-    If number is 0 or 1, keeps only the most recent archive. If
-    number is 2, keeps the most and second-most recent archives,
-    etc.
-    """
-    number = 1 if int(number) == 0 else int(number)
+file { '/var/www/html/index.html':
+  content => 'Hello, World!',
+  require => File['/var/www'],
+}
 
-    archives = sorted(os.listdir("versions"))
-    [archives.pop() for i in range(number)]
-    with lcd("versions"):
-        [local("rm ./{}".format(a)) for a in archives]
+file { '/var/www/error/404.html':
+  content => "Ceci n'est pas une page",
+  require => File['/var/www'],
+}
 
-    with cd("/data/web_static/releases"):
-        archives = run("ls -tr").split()
-        archives = [a for a in archives if "web_static_" in a]
-        [archives.pop() for i in range(number)]
-        [run("rm -rf ./{}".format(a)) for a in archives]
+exec { 'make-static-files-folder':
+  command => 'mkdir -p /data/web_static/releases/test /data/web_static/shared',
+  path    => '/usr/bin:/usr/sbin:/bin',
+  require => Package['nginx'],
+}
+
+file { '/data/web_static/releases/test/index.html':
+  content =>
+"<!DOCTYPE html>
+<html lang='en-US'>
+	<head>
+		<title>Home - AirBnB Clone</title>
+	</head>
+	<body>
+		<h1>Welcome to AirBnB!</h1>
+	<body>
+</html>
+",
+  replace => true,
+  require => Exec['make-static-files-folder'],
+}
+
+exec { 'link-static-files':
+  command => 'ln -sf /data/web_static/releases/test/ /data/web_static/current',
+  path    => '/usr/bin:/usr/sbin:/bin',
+  require => [
+    Exec['remove-current'],
+    File['/data/web_static/releases/test/index.html'],
+  ],
+}
+
+exec { 'change-data-owner':
+  command => 'chown -hR ubuntu:ubuntu /data',
+  path    => '/usr/bin:/usr/sbin:/bin',
+  require => Exec['link-static-files'],
+}
+
+file { '/etc/nginx/sites-available/default':
+  ensure  => present,
+  mode    => '0644',
+  content =>
+"server {
+	listen 80 default_server;
+	listen [::]:80 default_server;
+	server_name _;
+	index index.html index.htm;
+	error_page 404 /404.html;
+	add_header X-Served-By \$hostname;
+	location / {
+		root /var/www/html/;
+		try_files \$uri \$uri/ =404;
+	}
+	location /hbnb_static/ {
+		alias /data/web_static/current/;
+		try_files \$uri \$uri/ =404;
+	}
+	if (\$request_filename ~ redirect_me){
+		rewrite ^ https://sketchfab.com/bluepeno/models permanent;
+	}
+	location = /404.html {
+		root /var/www/error/;
+		internal;
+	}
+}",
+  require => [
+    Package['nginx'],
+    File['/var/www/html/index.html'],
+    File['/var/www/error/404.html'],
+    Exec['change-data-owner']
+  ],
+}
+
+exec { 'enable-site':
+  command => "ln -sf '/etc/nginx/sites-available/default' '/etc/nginx/sites-enabled/default'",
+  path    => '/usr/bin:/usr/sbin:/bin',
+  require => File['/etc/nginx/sites-available/default'],
+}
+
+exec { 'start-nginx':
+  command => 'sudo service nginx restart',
+  path    => '/usr/bin:/usr/sbin:/bin',
+  require => [
+    Exec['enable-site'],
+    Package['nginx'],
+    File['/data/web_static/releases/test/index.html'],
+  ],
+}
+
+Exec['start-nginx']
